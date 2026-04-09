@@ -22,16 +22,16 @@ const CODE_PATTERNS = [
   />\s*(\d{6})\s*</g,   // HTML标签之间的6位数字
 ]
 
-// AWS 验证码发件人
-const AWS_SENDERS = [
-  'no-reply@signin.aws',        // AWS 新发件人
-  'no-reply@login.awsapps.com',
-  'noreply@amazon.com',
-  'account-update@amazon.com',
-  'no-reply@aws.amazon.com',
-  'noreply@aws.amazon.com',
-  'aws'  // 模糊匹配
-]
+// AWS 验证码发件人 (保留用于参考，外部API会自动过滤)
+// const AWS_SENDERS = [
+//   'no-reply@signin.aws',        // AWS 新发件人
+//   'no-reply@login.awsapps.com',
+//   'noreply@amazon.com',
+//   'account-update@amazon.com',
+//   'no-reply@aws.amazon.com',
+//   'noreply@aws.amazon.com',
+//   'aws'  // 模糊匹配
+// ]
 
 // 随机姓名生成
 const FIRST_NAMES = ['James', 'Robert', 'John', 'Michael', 'David', 'William', 'Richard', 'Maria', 'Elizabeth', 'Jennifer', 'Linda', 'Barbara', 'Susan', 'Jessica']
@@ -115,128 +115,92 @@ function extractCode(text: string): string | null {
 
 /**
  * 从 Outlook 邮箱获取验证码
- * 使用 Microsoft Graph API，与 Python 版本保持一致
+ * 使用外部 Mail API (https://miall.133393.xyz)
  */
 export async function getOutlookVerificationCode(
   refreshToken: string,
   clientId: string,
   log: LogCallback,
-  timeout: number = 120
+  timeout: number = 120,
+  email?: string
 ): Promise<string | null> {
-  log('========== 开始获取邮箱验证码 ==========')
+  log('========== 开始获取邮箱验证码 (使用外部API) ==========')
+  log(`email: ${email || 'unknown'}`)
   log(`client_id: ${clientId}`)
   log(`refresh_token: ${refreshToken.substring(0, 30)}...`)
   
   const startTime = Date.now()
   const checkInterval = 5000 // 5秒检查一次
-  const checkedIds = new Set<string>()
+  const API_BASE_URL = 'https://miall.133393.xyz'
+  
+  // 尝试两个邮箱文件夹
+  const mailboxes = ['INBOX', 'Junk']
   
   while (Date.now() - startTime < timeout * 1000) {
     try {
-      // 刷新 access_token
-      log('刷新 access_token...')
-      let accessToken: string | null = null
-      
-      const tokenAttempts = [
-        { url: 'https://login.microsoftonline.com/consumers/oauth2/v2.0/token', scope: null },
-        { url: 'https://login.microsoftonline.com/common/oauth2/v2.0/token', scope: null },
-      ]
-      
-      for (const attempt of tokenAttempts) {
+      for (const mailbox of mailboxes) {
+        log(`检查 ${mailbox} 文件夹...`)
+        
         try {
-          const tokenBody = new URLSearchParams()
-          tokenBody.append('client_id', clientId)
-          tokenBody.append('refresh_token', refreshToken)
-          tokenBody.append('grant_type', 'refresh_token')
-          if (attempt.scope) {
-            tokenBody.append('scope', attempt.scope)
-          }
-          
-          const tokenResponse = await fetch(attempt.url, {
+          const response = await fetch(`${API_BASE_URL}/api/mail-new`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: tokenBody.toString()
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              refresh_token: refreshToken,
+              client_id: clientId,
+              email: email || '',
+              mailbox: mailbox,
+              response_type: 'json'
+            })
           })
           
-          if (tokenResponse.ok) {
-            const tokenResult = await tokenResponse.json() as { access_token: string }
-            accessToken = tokenResult.access_token
-            log('✓ 成功获取 access_token')
-            break
-          }
-        } catch {
-          continue
-        }
-      }
-      
-      if (!accessToken) {
-        log('✗ token 刷新失败')
-        return null
-      }
-      
-      // 获取邮件
-      log('获取邮件列表...')
-      const graphParams = new URLSearchParams({
-        '$top': '50',
-        '$orderby': 'receivedDateTime desc',
-        '$select': 'id,subject,from,receivedDateTime,bodyPreview,body'
-      })
-      
-      const mailResponse = await fetch(`https://graph.microsoft.com/v1.0/me/messages?${graphParams}`, {
-        headers: {
-          'Authorization': `Bearer ${accessToken}`,
-          'Content-Type': 'application/json'
-        }
-      })
-      
-      if (!mailResponse.ok) {
-        log(`获取邮件失败: ${mailResponse.status}`)
-        await new Promise(r => setTimeout(r, checkInterval))
-        continue
-      }
-      
-      const mailData = await mailResponse.json() as {
-        value: Array<{
-          id: string
-          subject: string
-          from: { emailAddress: { address: string } }
-          body: { content: string }
-          bodyPreview: string
-          receivedDateTime: string
-        }>
-      }
-      
-      log(`获取到 ${mailData.value?.length || 0} 封邮件`)
-      
-      // 搜索最新的 AWS 邮件
-      for (const mail of mailData.value || []) {
-        const fromEmail = mail.from?.emailAddress?.address?.toLowerCase() || ''
-        const isAwsSender = AWS_SENDERS.some(s => fromEmail.includes(s.toLowerCase()))
-        
-        if (isAwsSender && !checkedIds.has(mail.id)) {
-          checkedIds.add(mail.id)
-          
-          log(`\n=== 检查 AWS 邮件 ===`)
-          log(`  发件人: ${fromEmail}`)
-          log(`  主题: ${mail.subject?.substring(0, 50)}`)
-          
-          // 提取验证码
-          let code: string | null = null
-          const bodyText = htmlToText(mail.body?.content || '')
-          if (bodyText) {
-            code = extractCode(bodyText)
-          }
-          if (!code) {
-            code = extractCode(mail.body?.content || '')
-          }
-          if (!code) {
-            code = extractCode(mail.bodyPreview || '')
+          if (!response.ok) {
+            log(`  ${mailbox}: API 请求失败 (${response.status})`)
+            continue
           }
           
-          if (code) {
-            log(`\n========== 找到验证码: ${code} ==========`)
-            return code
+          const result = await response.json()
+          
+          // API 返回的是数组
+          if (Array.isArray(result) && result.length > 0) {
+            const emailData = result[0]
+            
+            log(`  ${mailbox}: 获取到邮件`)
+            log(`    发件人: ${emailData.send || 'unknown'}`)
+            log(`    主题: ${emailData.subject?.substring(0, 50) || 'unknown'}`)
+            
+            // 尝试从多个字段提取验证码
+            let code: string | null = null
+            
+            // 1. 尝试从 text 字段提取
+            if (emailData.text) {
+              code = extractCode(emailData.text)
+            }
+            
+            // 2. 尝试从 html 字段提取
+            if (!code && emailData.html) {
+              const bodyText = htmlToText(emailData.html)
+              code = extractCode(bodyText)
+            }
+            
+            // 3. 直接从 html 提取
+            if (!code && emailData.html) {
+              code = extractCode(emailData.html)
+            }
+            
+            if (code) {
+              log(`\n========== 找到验证码: ${code} ==========`)
+              return code
+            } else {
+              log(`    未找到验证码`)
+            }
+          } else {
+            log(`  ${mailbox}: 没有邮件`)
           }
+        } catch (error) {
+          log(`  ${mailbox}: 请求出错 - ${error}`)
         }
       }
       
@@ -836,7 +800,7 @@ export async function autoRegisterAWS(
       // 自动获取验证码
       let loginVerificationCode: string | null = null
       if (refreshToken && clientId) {
-        loginVerificationCode = await getOutlookVerificationCode(refreshToken, clientId, log, 120)
+        loginVerificationCode = await getOutlookVerificationCode(refreshToken, clientId, log, 120, email)
       } else {
         log('缺少 refresh_token 或 client_id，无法自动获取验证码')
       }
@@ -881,15 +845,28 @@ export async function autoRegisterAWS(
       
       // 步骤3: 等待验证码输入框出现，获取并输入验证码
       log('\n步骤3: 获取并输入验证码...')
-      // 选择器: input[placeholder="6 位数"]
-      const codeInputSelector = 'input[placeholder="6 位数"]'
+      // 支持多种 placeholder 格式
+      const codeInputSelectors = [
+        'input[placeholder="6-digit"]',      // English
+        'input[placeholder="6 位数"]',       // Chinese
+        'input[type="text"][autocomplete="on"]'  // Fallback by attributes
+      ]
       
       // 先等待验证码输入框出现
       log('等待验证码输入框出现...')
-      try {
-        await page.locator(codeInputSelector).first().waitFor({ state: 'visible', timeout: 30000 })
-        log('✓ 验证码输入框已出现')
-      } catch {
+      let codeInputSelector: string | null = null
+      for (const selector of codeInputSelectors) {
+        try {
+          await page.locator(selector).first().waitFor({ state: 'visible', timeout: 10000 })
+          codeInputSelector = selector
+          log(`✓ 验证码输入框已出现 (selector: ${selector})`)
+          break
+        } catch {
+          continue
+        }
+      }
+      
+      if (!codeInputSelector) {
         throw new Error('未找到验证码输入框')
       }
       
@@ -898,7 +875,7 @@ export async function autoRegisterAWS(
       // 自动获取验证码
       let verificationCode: string | null = null
       if (refreshToken && clientId) {
-        verificationCode = await getOutlookVerificationCode(refreshToken, clientId, log, 120)
+        verificationCode = await getOutlookVerificationCode(refreshToken, clientId, log, 120, email)
       } else {
         log('缺少 refresh_token 或 client_id，无法自动获取验证码')
       }

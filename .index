@@ -1,0 +1,16 @@
+LICENSE
+build-win.bat
+build
+docs
+electron-builder.yml
+electron.vite.config.ts
+eslint.config.mjs
+package.json
+resources
+src
+tsconfig.json
+tsconfig.node.json
+tsconfig.web.json
+package-lock.json
+node_modules
+out
